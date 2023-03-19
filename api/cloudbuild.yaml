@@ -24,5 +24,5 @@ options:
   substitutionOption: ALLOW_LOOSE
 
 substitutions:
-  _SERVICE_NAME: superbutton-api
+  _SERVICE_NAME: discusswithai-api
   _REGION: us-east1

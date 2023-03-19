@@ -3,7 +3,7 @@ FROM golang as builder
 ARG GIT_COMMIT
 ENV GIT_COMMIT=$GIT_COMMIT
 
-WORKDIR /superbutton
+WORKDIR /discusswithai
 
 COPY go.mod .
 COPY go.sum .
@@ -19,20 +19,20 @@ RUN go install github.com/swaggo/swag/cmd/swag@v1.8.7
 
 RUN swag init
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$GIT_COMMIT" -o /bin/superbutton .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$GIT_COMMIT" -o /bin/discusswithai .
 
 FROM alpine:latest
 
-RUN addgroup -S superbutton && adduser -S superbutton -G superbutton
+RUN addgroup -S discusswithai && adduser -S discusswithai -G discusswithai
 
-USER superbutton
-WORKDIR /home/superbutton
+USER discusswithai
+WORKDIR /home/discusswithai
 
 COPY --from=builder /usr/local/go/lib/time/zoneinfo.zip /zoneinfo.zip
-COPY --from=builder /bin/superbutton ./
+COPY --from=builder /bin/discusswithai ./
 
 ENV ZONEINFO=/zoneinfo.zip
 
 EXPOSE 8000
 
-ENTRYPOINT ["./superbutton", "--dotenv=false"]
+ENTRYPOINT ["./discusswithai", "--dotenv=false"]

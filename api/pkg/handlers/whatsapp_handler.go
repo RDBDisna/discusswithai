@@ -78,12 +78,12 @@ func (h *WhatsappHandler) Verify(c *fiber.Ctx) error {
 // @Tags         Messages
 // @Accept       json
 // @Produce      json
-// @Param        payload   body requests.NexmoReceiveRequest  true  "Received message request payload"
+// @Param        payload   body whatsapp.MessageWebhookRequest  true  "Received message request payload"
 // @Success      202  {object}  responses.Accepted
 // @Failure      400  {object}  responses.BadRequest
 // @Failure      422  {object}  responses.UnprocessableEntity
 // @Failure      500  {object}  responses.InternalServerError
-// @Router       /whatsapp/events [get]
+// @Router       /whatsapp/events [post]
 func (h *WhatsappHandler) Event(c *fiber.Ctx) error {
 	ctx, span, ctxLogger := h.tracer.StartFromFiberCtxWithLogger(c, h.logger)
 	defer span.End()
