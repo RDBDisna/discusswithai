@@ -9,7 +9,6 @@ import (
 	"github.com/NdoleStudio/discusswithai/pkg/entities"
 	"github.com/NdoleStudio/discusswithai/pkg/nexmo"
 	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/palantir/stacktrace"
 )
 
@@ -81,7 +80,7 @@ func (service *NexmoService) Receive(ctx context.Context, params *NexmoReceivePa
 		return
 	}
 
-	response, httpResponse, err := service.client.Sms.Send(ctx, &nexmo.SmsSendParams{
+	response, _, err := service.client.Sms.Send(ctx, &nexmo.SmsSendParams{
 		From: params.To,
 		To:   params.From,
 		Text: responseText,
@@ -91,8 +90,6 @@ func (service *NexmoService) Receive(ctx context.Context, params *NexmoReceivePa
 		ctxLogger.Error(service.tracer.WrapErrorSpan(span, stacktrace.Propagate(err, msg)))
 		return
 	}
-
-	spew.Dump(string(*httpResponse.Body))
 
 	ctxLogger.Info(fmt.Sprintf("sent response content SMS with id [%s] to [%s] with [%d] characters", response.Messages[0].MessageID, params.To, len(responseText)))
 }

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/NdoleStudio/discusswithai/pkg/whatsapp"
+
 	cloudtrace "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
 	"github.com/NdoleStudio/discusswithai/pkg/cache"
 	"github.com/NdoleStudio/discusswithai/pkg/entities"
@@ -61,7 +63,9 @@ func NewContainer(version string, projectID string) (container *Container) {
 	}
 
 	container.InitializeTraceProvider(version, os.Getenv("GCP_PROJECT_ID"))
+
 	container.RegisterNexmoRoutes()
+	container.RegisterWhatsappRoutes()
 
 	// this has to be last since it registers the /* route
 	container.RegisterSwaggerRoutes()
@@ -82,12 +86,28 @@ func (container *Container) RegisterNexmoRoutes() {
 	container.NexmoHandler().RegisterRoutes(container.App())
 }
 
+// RegisterWhatsappRoutes registers routes for the /v1/whatsapp prefix
+func (container *Container) RegisterWhatsappRoutes() {
+	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.NexmoHandler{}))
+	container.WhatsappHandler().RegisterRoutes(container.App())
+}
+
 // NexmoHandlerValidator creates a new instance of validators.NexmoHandlerValidator
 func (container *Container) NexmoHandlerValidator() (validator *validators.NexmoHandlerValidator) {
 	container.logger.Debug(fmt.Sprintf("creating %T", validator))
 	return validators.NewNexmoHandlerValidator(
 		container.Logger(),
 		container.Tracer(),
+	)
+}
+
+// WhatsappHandler creates a new instance of handlers.WhatsappHandler
+func (container *Container) WhatsappHandler() (handler *handlers.WhatsappHandler) {
+	container.logger.Debug(fmt.Sprintf("creating %T", handler))
+	return handlers.NewWhatsappHandler(
+		container.Logger(),
+		container.Tracer(),
+		container.WhatsappService(),
 	)
 }
 
@@ -100,6 +120,15 @@ func (container *Container) NexmoHandler() (handler *handlers.NexmoHandler) {
 		container.Tracer(),
 		container.NexmoService(),
 		container.NexmoHandlerValidator(),
+	)
+}
+
+// WhatsappClient creates a new instance of whatsapp.Client
+func (container *Container) WhatsappClient() (service *whatsapp.Client) {
+	container.logger.Debug(fmt.Sprintf("creating %T", service))
+	return whatsapp.New(
+		whatsapp.WithHTTPClient(container.HTTPClient("whatsapp")),
+		whatsapp.WithAccessToken(os.Getenv("WHATSAPP_ACCESS_TOKEN")),
 	)
 }
 
@@ -126,6 +155,17 @@ func (container *Container) OpenAPIService() (service *services.OpenAPIService) 
 		container.Logger(),
 		container.Tracer(),
 		container.OpenAPIClient(),
+	)
+}
+
+// WhatsappService creates a new instance of services.WhatsappService
+func (container *Container) WhatsappService() (service *services.WhatsappService) {
+	container.logger.Debug(fmt.Sprintf("creating %T", service))
+	return services.NewWhatsappService(
+		container.Logger(),
+		container.Tracer(),
+		container.WhatsappClient(),
+		container.OpenAPIService(),
 	)
 }
 

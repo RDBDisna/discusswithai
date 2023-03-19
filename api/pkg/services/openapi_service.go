@@ -3,10 +3,10 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/NdoleStudio/discusswithai/pkg/entities"
 	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/palantir/stacktrace"
 	"github.com/sashabaranov/go-openai"
 )
@@ -35,6 +35,7 @@ func NewOpenAPIService(
 type OpenAPICompletionParams struct {
 	ChannelID string
 	Channel   entities.Channel
+	Name      string
 	Message   string
 }
 
@@ -43,16 +44,22 @@ func (service *OpenAPIService) GetChatCompletion(ctx context.Context, params *Op
 	ctx, span, _ := service.tracer.StartWithLogger(ctx, service.logger)
 	defer span.End()
 
+	name := "a user"
+	if params.Name != "" {
+		name = params.Name
+	}
+
 	response, err := service.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model:     openai.GPT3Dot5Turbo,
-		MaxTokens: 200,
+		MaxTokens: 3000,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    "system",
-				Content: "As a user chatting with an AI language model",
+				Content: fmt.Sprintf("As %s chatting with the OpenAI language model via %s.", name, params.Channel),
 			},
 			{
 				Role:    "user",
+				Name:    params.Name,
 				Content: params.Message,
 			},
 		},
@@ -62,7 +69,5 @@ func (service *OpenAPIService) GetChatCompletion(ctx context.Context, params *Op
 		return "", service.tracer.WrapErrorSpan(span, stacktrace.Propagate(err, msg))
 	}
 
-	spew.Dump(response)
-
-	return response.Choices[0].Message.Content, nil
+	return strings.TrimRight(response.Choices[0].Message.Content, "\n"), nil
 }
