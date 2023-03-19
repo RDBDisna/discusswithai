@@ -3,30 +3,26 @@ package main
 import (
 	"os"
 
-	_ "github.com/NdoleStudio/superbutton/docs"
-	"github.com/NdoleStudio/superbutton/pkg/di"
+	_ "github.com/NdoleStudio/discusswithai/docs"
+	"github.com/NdoleStudio/discusswithai/pkg/di"
 )
 
 // Version is the version of the API
 var Version string
 
-// @title       Superbutton
+// @title       Discuss With AI
 // @version     1.0
-// @description Backend API to construct floating buttons
+// @description Send chat GPT prompts using SMS (Text), Whatsapp, Email etc
 //
 // @contact.name  Acho Arnold
-// @contact.email support@superbutton.app
+// @contact.email arnold@discusswithai.com
 //
 // @license.name MIT
-// @license.url  https://raw.githubusercontent.com/NdoleStudio/superbutton/main/LICENSE
+// @license.url  https://raw.githubusercontent.com/NdoleStudio/discusswithai/main/LICENSE
 //
-// @host     api.superbutton.app
+// @host     api.discusswithai.com
 // @schemes  https
 // @BasePath /v1
-//
-// @securitydefinitions.apikey BearerAuth
-// @in header
-// @name Authorization
 func main() {
 	if len(os.Args) == 1 {
 		di.LoadEnv()

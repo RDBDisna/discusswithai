@@ -1,8 +1,6 @@
 package requests
 
 import (
-	"fmt"
-	"net/url"
 	"strings"
 	"unicode"
 
@@ -30,11 +28,6 @@ func (request *request) sanitizePhoneNumber(value string) string {
 	}
 
 	return value
-}
-
-func (request *request) baseURL(value string) string {
-	u, _ := url.Parse(value)
-	return fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 }
 
 func (request *request) isDigits(value string) bool {

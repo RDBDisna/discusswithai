@@ -7,7 +7,7 @@ import (
 
 	cloudtasks "cloud.google.com/go/cloudtasks/apiv2"
 	"cloud.google.com/go/cloudtasks/apiv2/cloudtaskspb"
-	"github.com/NdoleStudio/superbutton/pkg/telemetry"
+	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
 	"github.com/palantir/stacktrace"
 )
 

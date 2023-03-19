@@ -2,54 +2,50 @@ package di
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	lemonsqueezy "github.com/NdoleStudio/lemonsqueezy-go"
-
-	"github.com/NdoleStudio/superbutton/pkg/listeners"
-
-	cloudtasks "cloud.google.com/go/cloudtasks/apiv2"
-	firebase "firebase.google.com/go"
-	"firebase.google.com/go/auth"
 	cloudtrace "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
-	"github.com/NdoleStudio/superbutton/pkg/entities"
-	"github.com/NdoleStudio/superbutton/pkg/handlers"
-	"github.com/NdoleStudio/superbutton/pkg/middlewares"
-	"github.com/NdoleStudio/superbutton/pkg/queue"
-	"github.com/NdoleStudio/superbutton/pkg/repositories"
-	"github.com/NdoleStudio/superbutton/pkg/services"
-	"github.com/NdoleStudio/superbutton/pkg/telemetry"
-	"github.com/NdoleStudio/superbutton/pkg/validators"
+	"github.com/NdoleStudio/discusswithai/pkg/cache"
+	"github.com/NdoleStudio/discusswithai/pkg/entities"
+	"github.com/NdoleStudio/discusswithai/pkg/handlers"
+	"github.com/NdoleStudio/discusswithai/pkg/middlewares"
+	"github.com/NdoleStudio/discusswithai/pkg/nexmo"
+	"github.com/NdoleStudio/discusswithai/pkg/services"
+	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
+	"github.com/NdoleStudio/discusswithai/pkg/validators"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	fiberLogger "github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/swagger"
 	"github.com/hirosassa/zerodriver"
-	"github.com/jinzhu/now"
 	"github.com/palantir/stacktrace"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
+	openapi "github.com/sashabaranov/go-openai"
 	"github.com/uptrace/uptrace-go/uptrace"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
-	"google.golang.org/api/option"
 	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 	gormLogger "gorm.io/gorm/logger"
+
+	"github.com/jinzhu/now"
+	"gorm.io/gorm"
 )
 
 // Container is used to resolve services at runtime
 type Container struct {
-	projectID       string
-	db              *gorm.DB
-	app             *fiber.App
-	eventDispatcher *services.EventDispatcher
-	logger          telemetry.Logger
+	projectID string
+	db        *gorm.DB
+	app       *fiber.App
+	logger    telemetry.Logger
 }
 
 // NewContainer creates a new dependency injection container
@@ -65,22 +61,7 @@ func NewContainer(version string, projectID string) (container *Container) {
 	}
 
 	container.InitializeTraceProvider(version, os.Getenv("GCP_PROJECT_ID"))
-
-	container.RegisterMarketingListeners()
-	container.RegisterUserListeners()
-
-	container.RegisterUserRoutes()
-	container.RegisterEventRoutes()
-	container.RegisterProjectRoutes()
-	container.RegisterWhatsappIntegrationRoutes()
-	container.ProjectIntegrationRoutes()
-	container.RegisterContentIntegrationRoutes()
-	container.RegisterPhoneCallIntegrationRoutes()
-	container.RegisterLinkIntegrationRoutes()
-
-	// UnAuthenticated routes
-	container.RegisterProjectSettingsRoutes()
-	container.RegisterLemonsqueezyRoutes()
+	container.RegisterNexmoRoutes()
 
 	// this has to be last since it registers the /* route
 	container.RegisterSwaggerRoutes()
@@ -89,478 +70,95 @@ func NewContainer(version string, projectID string) (container *Container) {
 }
 
 // RegisterSwaggerRoutes registers routes for swagger
+
 func (container *Container) RegisterSwaggerRoutes() {
 	container.logger.Debug("registering swagger routes")
 	container.App().Get("/*", swagger.HandlerDefault)
 }
 
-// AuthenticatedMiddleware creates a new instance of middlewares.Authenticated
-func (container *Container) AuthenticatedMiddleware() fiber.Handler {
-	container.logger.Debug("creating middlewares.Authenticated")
-	return middlewares.Authenticated(container.Tracer())
+// RegisterNexmoRoutes registers routes for the /v1/nexmo prefix
+func (container *Container) RegisterNexmoRoutes() {
+	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.NexmoHandler{}))
+	container.NexmoHandler().RegisterRoutes(container.App())
 }
 
-// GoogleAuthMiddlewares creates router for authenticated requests
-func (container *Container) GoogleAuthMiddlewares(audience string, subject string) []fiber.Handler {
-	container.logger.Debug("creating GoogleAuthMiddlewares")
-	return []fiber.Handler{
-		middlewares.GoogleAuth(container.Logger(), container.Tracer(), audience, subject),
-		container.AuthenticatedMiddleware(),
+// NexmoHandlerValidator creates a new instance of validators.NexmoHandlerValidator
+func (container *Container) NexmoHandlerValidator() (validator *validators.NexmoHandlerValidator) {
+	container.logger.Debug(fmt.Sprintf("creating %T", validator))
+	return validators.NewNexmoHandlerValidator(
+		container.Logger(),
+		container.Tracer(),
+	)
+}
+
+// NexmoHandler creates a new instance of handlers.NexmoHandler
+func (container *Container) NexmoHandler() (handler *handlers.NexmoHandler) {
+	container.logger.Debug(fmt.Sprintf("creating %T", handler))
+
+	return handlers.NewNexmoHandler(
+		container.Logger(),
+		container.Tracer(),
+		container.NexmoService(),
+		container.NexmoHandlerValidator(),
+	)
+}
+
+// NexmoClient creates a new instance of nexmo.Client
+func (container *Container) NexmoClient() (service *nexmo.Client) {
+	container.logger.Debug(fmt.Sprintf("creating %T", service))
+	return nexmo.New(
+		nexmo.WithHTTPClient(container.HTTPClient("nexmo")),
+		nexmo.WithAPIKey(os.Getenv("NEXMO_API_KEY")),
+		nexmo.WithAPISecret(os.Getenv("NEXMO_API_SECRET")),
+	)
+}
+
+// OpenAPIClient creates a new instance of openapi.Client
+func (container *Container) OpenAPIClient() (service *openapi.Client) {
+	container.logger.Debug(fmt.Sprintf("creating %T", service))
+	return openapi.NewClient(os.Getenv("OPENAPI_AUTH_TOKEN"))
+}
+
+// OpenAPIService creates a new instance of services.OpenAPIService
+func (container *Container) OpenAPIService() (service *services.OpenAPIService) {
+	container.logger.Debug(fmt.Sprintf("creating %T", service))
+	return services.NewOpenAPIService(
+		container.Logger(),
+		container.Tracer(),
+		container.OpenAPIClient(),
+	)
+}
+
+// NexmoService creates a new instance of services.NexmoService
+func (container *Container) NexmoService() (service *services.NexmoService) {
+	container.logger.Debug(fmt.Sprintf("creating %T", service))
+	return services.NewNexmoService(
+		container.Logger(),
+		container.Tracer(),
+		container.NexmoClient(),
+		container.Cache(),
+		container.OpenAPIService(),
+	)
+}
+
+// HTTPClient creates a new http.Client
+func (container *Container) HTTPClient(name string) *http.Client {
+	container.logger.Debug(fmt.Sprintf("creating %s %T", name, http.DefaultClient))
+	return &http.Client{
+		Timeout: 60 * time.Second,
 	}
 }
 
-// FirebaseAuthMiddlewares creates router for authenticated requests
-func (container *Container) FirebaseAuthMiddlewares() []fiber.Handler {
-	container.logger.Debug("creating FirebaseAuthRouter")
-	return []fiber.Handler{
-		middlewares.FirebaseAuth(container.Logger(), container.Tracer(), container.FirebaseAuthClient()),
-		container.AuthenticatedMiddleware(),
-	}
-}
-
-// RegisterMarketingListeners registers the marketing handlers to events
-func (container *Container) RegisterMarketingListeners() {
-	container.logger.Debug(fmt.Sprintf("registering %T listeners", &listeners.MarketingListener{}))
-	routes := listeners.MarketingListeners(
-		container.Tracer(),
-		container.Logger(),
-		container.MarketingService(),
-	)
-	for event, listener := range routes {
-		container.EventDispatcher().Subscribe(event, listener)
-	}
-}
-
-// RegisterUserListeners registers the user handlers to events
-func (container *Container) RegisterUserListeners() {
-	container.logger.Debug(fmt.Sprintf("registering %T listeners", &listeners.UserListener{}))
-	routes := listeners.UserListeners(
-		container.Tracer(),
-		container.Logger(),
-		container.UserService(),
-	)
-	for event, listener := range routes {
-		container.EventDispatcher().Subscribe(event, listener)
-	}
-}
-
-// RegisterUserRoutes registers routes for the /users prefix
-func (container *Container) RegisterUserRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.UserHandler{}))
-	container.UserHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// RegisterProjectSettingsRoutes registers routes for the /project-settings prefix
-func (container *Container) RegisterProjectSettingsRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.ProjectSettingsHandler{}))
-	container.ProjectSettingsHandler().RegisterRoutes(container.App())
-}
-
-// RegisterLemonsqueezyRoutes registers routes for the /project-settings prefix
-func (container *Container) RegisterLemonsqueezyRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.LemonsqueezyHandler{}))
-	container.LemonsqueezyHandler().RegisterRoutes(container.App())
-}
-
-// RegisterProjectRoutes registers routes for the /projects prefix
-func (container *Container) RegisterProjectRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.ProjectHandler{}))
-	container.ProjectHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// RegisterWhatsappIntegrationRoutes registers routes for the /projects/:projectID/whatsapp-integrations prefix
-func (container *Container) RegisterWhatsappIntegrationRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.WhatsappIntegrationHandler{}))
-	container.WhatsappIntegrationHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// RegisterContentIntegrationRoutes registers routes for the /projects/:projectID/content-integrations prefix
-func (container *Container) RegisterContentIntegrationRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.ContentIntegrationHandler{}))
-	container.ContentIntegrationHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// RegisterPhoneCallIntegrationRoutes registers routes for the /projects/:projectID/phone-call-integrations prefix
-func (container *Container) RegisterPhoneCallIntegrationRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.ContentIntegrationHandler{}))
-	container.PhoneCallIntegrationHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// RegisterLinkIntegrationRoutes registers routes for the /projects/:projectID/link-integrations prefix
-func (container *Container) RegisterLinkIntegrationRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.ContentIntegrationHandler{}))
-	container.LinkIntegrationHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// ProjectIntegrationRoutes registers routes for the /projects/:projectID/integrations prefix
-func (container *Container) ProjectIntegrationRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.ProjectIntegrationHandler{}))
-	container.ProjectIntegrationHandler().RegisterRoutes(container.App(), container.FirebaseAuthMiddlewares())
-}
-
-// UserHandlerValidator creates a new instance of validators.UserHandlerValidator
-func (container *Container) UserHandlerValidator() (validator *validators.UserHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewUserHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-	)
-}
-
-// LemonsqueezyHandlerValidator creates a new instance of validators.LemonsqueezyHandlerValidator
-func (container *Container) LemonsqueezyHandlerValidator() (validator *validators.LemonsqueezyHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewLemonsqueezyHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-		container.LemonsqueezyClient(),
-	)
-}
-
-// LinkIntegrationHandlerValidator creates a new instance of validators.LinkIntegrationHandlerValidator
-func (container *Container) LinkIntegrationHandlerValidator() (validator *validators.LinkIntegrationHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewLinkIntegrationHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-	)
-}
-
-// ContentIntegrationHandlerValidator creates a new instance of validators.ContentIntegrationHandlerValidator
-func (container *Container) ContentIntegrationHandlerValidator() (validator *validators.ContentIntegrationHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewContentIntegrationHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-	)
-}
-
-// PhoneCallIntegrationHandlerValidator creates a new instance of validators.PhoneCallIntegrationHandlerValidator
-func (container *Container) PhoneCallIntegrationHandlerValidator() (validator *validators.PhoneCallIntegrationHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewPhoneCallIntegrationHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-	)
-}
-
-// WhatsappIntegrationHandlerValidator creates a new instance of validators.WhatsappIntegrationHandlerValidator
-func (container *Container) WhatsappIntegrationHandlerValidator() (validator *validators.WhatsappIntegrationHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewWhatsappIntegrationHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-	)
-}
-
-// ProjectHandlerValidator creates a new instance of validators.ProjectHandlerValidator
-func (container *Container) ProjectHandlerValidator() (validator *validators.ProjectHandlerValidator) {
-	container.logger.Debug(fmt.Sprintf("creating %T", validator))
-	return validators.NewProjectHandlerValidator(
-		container.Logger(),
-		container.Tracer(),
-	)
-}
-
-// UserHandler creates a new instance of handlers.UserHandler
-func (container *Container) UserHandler() (handler *handlers.UserHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewUserHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.UserHandlerValidator(),
-		container.UserService(),
-	)
-}
-
-// WhatsappIntegrationHandler creates a new instance of handlers.WhatsappIntegrationHandler
-func (container *Container) WhatsappIntegrationHandler() (handler *handlers.WhatsappIntegrationHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewWhatsappIntegrationHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.WhatsappIntegrationHandlerValidator(),
-		container.WhatsappIntegrationService(),
-	)
-}
-
-// ContentIntegrationHandler creates a new instance of handlers.ContentIntegrationHandler
-func (container *Container) ContentIntegrationHandler() (handler *handlers.ContentIntegrationHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewContentIntegrationHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.ContentIntegrationHandlerValidator(),
-		container.ContentIntegrationService(),
-	)
-}
-
-// ProjectIntegrationHandler creates a new instance of handlers.ProjectIntegrationHandler
-func (container *Container) ProjectIntegrationHandler() (handler *handlers.ProjectIntegrationHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewIntegrationHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.ProjectIntegrationService(),
-	)
-}
-
-// PhoneCallIntegrationHandler creates a new instance of handlers.PhoneCallIntegrationHandler
-func (container *Container) PhoneCallIntegrationHandler() (handler *handlers.PhoneCallIntegrationHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewPhoneCallIntegrationHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.PhoneCallIntegrationHandlerValidator(),
-		container.PhoneCallIntegrationService(),
-	)
-}
-
-// LinkIntegrationHandler creates a new instance of handlers.LinkIntegrationHandler
-func (container *Container) LinkIntegrationHandler() (handler *handlers.LinkIntegrationHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewLinkIntegrationHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.LinkIntegrationHandlerValidator(),
-		container.LinkIntegrationService(),
-	)
-}
-
-// ProjectHandler creates a new instance of handlers.ProjectHandler
-func (container *Container) ProjectHandler() (handler *handlers.ProjectHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewProjectHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.ProjectHandlerValidator(),
-		container.ProjectService(),
-	)
-}
-
-// ProjectSettingsHandler creates a new instance of handlers.ProjectSettingsHandler
-func (container *Container) ProjectSettingsHandler() (handler *handlers.ProjectSettingsHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-	return handlers.NewProjectSettingsHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.ProjectSettingService(),
-	)
-}
-
-// MarketingService creates a new instance of services.MarketingService
-func (container *Container) MarketingService() (service *services.MarketingService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewMarketingService(
-		container.Logger(),
-		container.Tracer(),
-		container.FirebaseAuthClient(),
-		os.Getenv("SENDGRID_API_KEY"),
-		os.Getenv("SENDGRID_LIST_ID"),
-	)
-}
-
-// LemonsqueezyService creates a new instance of services.LemonsqueezyService
-func (container *Container) LemonsqueezyService() (service *services.LemonsqueezyService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewLemonsqueezyService(
-		container.Logger(),
-		container.Tracer(),
-		container.UserRepository(),
-		container.EventDispatcher(),
-	)
-}
-
-// UserService creates a new instance of services.UserService
-func (container *Container) UserService() (service *services.UserService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewUserService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.UserRepository(),
-		container.LemonsqueezyClient(),
-	)
-}
-
-// ProjectIntegrationService creates a new instance of services.ProjectIntegrationService
-func (container *Container) ProjectIntegrationService() (service *services.ProjectIntegrationService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewProjectIntegrationService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.ProjectIntegrationRepository(),
-	)
-}
-
-// ProjectSettingService creates a new instance of services.ProjectSettingsService
-func (container *Container) ProjectSettingService() (service *services.ProjectSettingsService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewProjectSettingsService(
-		container.Logger(),
-		container.Tracer(),
-		container.ProjectRepository(),
-		container.WhatsappIntegrationRepository(),
-		container.ContentIntegrationRepository(),
-		container.ProjectIntegrationRepository(),
-		container.PhoneCallIntegrationRepository(),
-		container.LinkIntegrationRepository(),
-	)
-}
-
-// WhatsappIntegrationService creates a new instance of services.WhatsappIntegrationService
-func (container *Container) WhatsappIntegrationService() (service *services.WhatsappIntegrationService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewWhatsappIntegrationService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.ProjectRepository(),
-		container.WhatsappIntegrationRepository(),
-	)
-}
-
-// ContentIntegrationService creates a new instance of services.ContentIntegrationService
-func (container *Container) ContentIntegrationService() (service *services.ContentIntegrationService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewContentIntegrationService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.ProjectRepository(),
-		container.ContentIntegrationRepository(),
-	)
-}
-
-// PhoneCallIntegrationService creates a new instance of services.PhoneCallIntegrationService
-func (container *Container) PhoneCallIntegrationService() (service *services.PhoneCallIntegrationService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewPhoneCallIntegrationService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.ProjectRepository(),
-		container.PhoneCallIntegrationRepository(),
-	)
-}
-
-// LinkIntegrationService creates a new instance of services.LinkIntegrationService
-func (container *Container) LinkIntegrationService() (service *services.LinkIntegrationService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewLinkIntegrationService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.ProjectRepository(),
-		container.LinkIntegrationRepository(),
-	)
-}
-
-// ProjectService creates a new instance of services.ProjectService
-func (container *Container) ProjectService() (service *services.ProjectService) {
-	container.logger.Debug(fmt.Sprintf("creating %T", service))
-	return services.NewProjectService(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-		container.ProjectRepository(),
-	)
-}
-
-// EventDispatcher creates a new instance of services.EventDispatcher
-func (container *Container) EventDispatcher() (dispatcher *services.EventDispatcher) {
-	if container.eventDispatcher != nil {
-		return container.eventDispatcher
-	}
-
-	container.logger.Debug(fmt.Sprintf("creating %T", dispatcher))
-	dispatcher = services.NewEventDispatcher(
-		container.Logger(),
-		container.Tracer(),
-		container.EventRepository(),
-		container.EventsQueue(),
-		os.Getenv("QUEUE_URL_EVENTS"),
-	)
-
-	container.eventDispatcher = dispatcher
-	return dispatcher
-}
-
-// EventsQueue creates a new instance of services.PushQueue
-func (container *Container) EventsQueue() queue.Client {
-	container.logger.Debug("creating queue.Client")
-
-	return queue.NewGooglePushQueue(
-		container.Logger(),
-		container.Tracer(),
-		container.CloudTasksClient(),
-		os.Getenv("QUEUE_NAME_EVENTS"),
-		os.Getenv("QUEUE_AUTH_EMAIL"),
-	)
-}
-
-// CloudTasksClient creates a new instance of cloudtasks.Client
-func (container *Container) CloudTasksClient() (client *cloudtasks.Client) {
-	container.logger.Debug(fmt.Sprintf("creating %T", client))
-
-	client, err := cloudtasks.NewClient(
-		context.Background(),
-		option.WithCredentialsJSON(container.FirebaseCredentials()),
-	)
-	if err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, "cannot initialize cloud tasks client"))
-	}
-
-	return client
-}
-
-// EventRepository creates a new instance of repositories.EventRepository
-func (container *Container) EventRepository() (repository repositories.EventRepository) {
-	container.logger.Debug("creating GORM repositories.EventRepository")
-	return repositories.NewGormEventRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
-
-// RegisterEventRoutes registers routes for the /events prefix
-func (container *Container) RegisterEventRoutes() {
-	container.logger.Debug(fmt.Sprintf("registering %T routes", &handlers.EventsHandler{}))
-	container.
-		EventsHandler().
-		RegisterRoutes(
-			container.App(),
-			container.GoogleAuthMiddlewares(
-				os.Getenv("QUEUE_URL_EVENTS"),
-				os.Getenv("QUEUE_AUTH_SUBJECT"),
-			),
-		)
-}
-
-// LemonsqueezyHandler creates a new instance of handlers.LemonsqueezyHandler
-func (container *Container) LemonsqueezyHandler() (handler *handlers.LemonsqueezyHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-
-	return handlers.NewLemonsqueezyHandlerHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.LemonsqueezyService(),
-		container.LemonsqueezyHandlerValidator(),
-	)
-}
-
-// EventsHandler creates a new instance of handlers.EventsHandler
-func (container *Container) EventsHandler() (handler *handlers.EventsHandler) {
-	container.logger.Debug(fmt.Sprintf("creating %T", handler))
-
-	return handlers.NewEventsHandler(
-		container.Logger(),
-		container.Tracer(),
-		container.EventDispatcher(),
-	)
-}
+//// HTTPRoundTripper creates an open telemetry http.RoundTripper
+//func (container *Container) HTTPRoundTripper(name string) http.RoundTripper {
+//	container.logger.Debug(fmt.Sprintf("Debug: initializing %s %T", name, http.DefaultTransport))
+//	return otelroundtripper.New(
+//		otelroundtripper.WithName(name),
+//		otelroundtripper.WithParent(container.RetryHTTPRoundTripper()),
+//		otelroundtripper.WithMeter(global.Meter(container.projectID)),
+//		otelroundtripper.WithAttributes(container.OtelResources(container.version, container.projectID).Attributes()...),
+//	)
+//}
 
 // App creates a new instance of fiber.App
 func (container *Container) App() (app *fiber.App) {
@@ -602,74 +200,18 @@ func (container *Container) InitializeOtelResources(version string, namespace st
 	)
 }
 
-// UserRepository registers a new instance of repositories.UserRepository
-func (container *Container) UserRepository() repositories.UserRepository {
-	container.logger.Debug("creating GORM repositories.UserRepository")
-	return repositories.NewGormUserRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
+// Cache creates a new instance of cache.Cache
+func (container *Container) Cache() cache.Cache {
+	container.logger.Debug("creating cache.Cache")
+	opt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+	if err != nil {
+		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot parse redis url [%s]", os.Getenv("REDIS_URL"))))
+	}
+	opt.TLSConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 
-// ProjectRepository registers a new instance of repositories.ProjectRepository
-func (container *Container) ProjectRepository() repositories.ProjectRepository {
-	container.logger.Debug("creating GORM repositories.ProjectRepository")
-	return repositories.NewGormProjectRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
-
-// WhatsappIntegrationRepository registers a new instance of repositories.WhatsappIntegrationRepository
-func (container *Container) WhatsappIntegrationRepository() repositories.WhatsappIntegrationRepository {
-	container.logger.Debug("creating GORM repositories.WhatsappIntegrationRepository")
-	return repositories.NewGormWhatsappIntegrationRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
-
-// ContentIntegrationRepository registers a new instance of repositories.ContentIntegrationRepository
-func (container *Container) ContentIntegrationRepository() repositories.ContentIntegrationRepository {
-	container.logger.Debug("creating GORM repositories.ContentIntegrationRepository")
-	return repositories.NewGormContentIntegrationRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
-
-// PhoneCallIntegrationRepository registers a new instance of repositories.PhoneCallIntegrationRepository
-func (container *Container) PhoneCallIntegrationRepository() repositories.PhoneCallIntegrationRepository {
-	container.logger.Debug("creating GORM repositories.PhoneCallIntegrationRepository")
-	return repositories.NewGormPhoneCallIntegrationRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
-
-// LinkIntegrationRepository registers a new instance of repositories.LinkIntegrationRepository
-func (container *Container) LinkIntegrationRepository() repositories.LinkIntegrationRepository {
-	container.logger.Debug("creating GORM repositories.LinkIntegrationRepository")
-	return repositories.NewGormLinkIntegrationRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
-}
-
-// ProjectIntegrationRepository registers a new instance of repositories.ProjectIntegrationRepository
-func (container *Container) ProjectIntegrationRepository() repositories.ProjectIntegrationRepository {
-	container.logger.Debug("creating GORM repositories.UserRepository")
-	return repositories.NewGormProjectIntegrationRepository(
-		container.Logger(),
-		container.Tracer(),
-		container.DB(),
-	)
+	return cache.NewRedisCache(container.Tracer(), redis.NewClient(opt))
 }
 
 // Logger creates a new instance of telemetry.Logger
@@ -711,38 +253,11 @@ func (container *Container) DB() (db *gorm.DB) {
 
 	container.logger.Debug(fmt.Sprintf("Running migrations for %T", db))
 
-	if err = db.AutoMigrate(&entities.User{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.User{})))
-	}
-	if err = db.AutoMigrate(&repositories.GormEvent{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &repositories.GormEvent{})))
-	}
-	if err = db.AutoMigrate(&entities.Project{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.Project{})))
-	}
-	if err = db.AutoMigrate(&entities.ProjectIntegration{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.ProjectIntegration{})))
-	}
-	if err = db.AutoMigrate(&entities.WhatsappIntegration{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.WhatsappIntegration{})))
-	}
-	if err = db.AutoMigrate(&entities.ContentIntegration{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.ContentIntegration{})))
-	}
-	if err = db.AutoMigrate(&entities.PhoneCallIntegration{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.PhoneCallIntegration{})))
-	}
-	if err = db.AutoMigrate(&entities.LinkIntegration{}); err != nil {
-		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.LinkIntegration{})))
+	if err = db.AutoMigrate(&entities.Message{}); err != nil {
+		container.logger.Fatal(stacktrace.Propagate(err, fmt.Sprintf("cannot migrate %T", &entities.Message{})))
 	}
 
 	return container.db
-}
-
-// FirebaseCredentials returns firebase credentials as bytes.
-func (container *Container) FirebaseCredentials() []byte {
-	container.logger.Debug("creating firebase credentials")
-	return []byte(os.Getenv("FIREBASE_CREDENTIALS"))
 }
 
 // Tracer creates a new instance of telemetry.Tracer
@@ -752,37 +267,6 @@ func (container *Container) Tracer() (t telemetry.Tracer) {
 		container.projectID,
 		container.Logger(),
 	)
-}
-
-// FirebaseApp creates a new instance of firebase.App
-func (container *Container) FirebaseApp() (app *firebase.App) {
-	container.logger.Debug(fmt.Sprintf("creating %T", app))
-	app, err := firebase.NewApp(context.Background(), nil, option.WithCredentialsJSON(container.FirebaseCredentials()))
-	if err != nil {
-		msg := "cannot initialize firebase application"
-		container.logger.Fatal(stacktrace.Propagate(err, msg))
-	}
-	return app
-}
-
-// LemonsqueezyClient creates a new instance of lemonsqueezy.Client
-func (container *Container) LemonsqueezyClient() (client *lemonsqueezy.Client) {
-	container.logger.Debug(fmt.Sprintf("creating %T", client))
-	return lemonsqueezy.New(
-		lemonsqueezy.WithAPIKey(os.Getenv("LEMONSQUEEZY_API_KEY")),
-		lemonsqueezy.WithSigningSecret(os.Getenv("LEMONSQUEEZY_SIGNING_SECRET")),
-	)
-}
-
-// FirebaseAuthClient creates a new instance of auth.Client
-func (container *Container) FirebaseAuthClient() (client *auth.Client) {
-	container.logger.Debug(fmt.Sprintf("creating %T", client))
-	authClient, err := container.FirebaseApp().Auth(context.Background())
-	if err != nil {
-		msg := "cannot initialize firebase auth client"
-		container.logger.Fatal(stacktrace.Propagate(err, msg))
-	}
-	return authClient
 }
 
 // InitializeTraceProvider initializes the open telemetry trace provider

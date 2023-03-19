@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
 	lemonsqueezy "github.com/NdoleStudio/lemonsqueezy-go"
-	"github.com/NdoleStudio/superbutton/pkg/telemetry"
 )
 
 // LemonsqueezyHandlerValidator validates models used in handlers.LemonsqueezyHandler

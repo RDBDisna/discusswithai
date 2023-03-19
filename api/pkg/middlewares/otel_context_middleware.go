@@ -6,8 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/NdoleStudio/superbutton/pkg/telemetry"
 	"github.com/gofiber/fiber/v2"
+
+	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
 	"github.com/palantir/stacktrace"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

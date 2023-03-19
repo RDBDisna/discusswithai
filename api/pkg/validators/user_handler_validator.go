@@ -3,7 +3,7 @@ package validators
 import (
 	"fmt"
 
-	"github.com/NdoleStudio/superbutton/pkg/telemetry"
+	"github.com/NdoleStudio/discusswithai/pkg/telemetry"
 )
 
 // UserHandlerValidator validates models used in handlers.UserHandler
