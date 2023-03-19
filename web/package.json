@@ -8,6 +8,7 @@
     "postinstall": "nuxt prepare"
   },
   "devDependencies": {
+    "@nuxt/typescript-build": "^3.0.0",
     "nuxt": "^3.3.1"
   }
 }
