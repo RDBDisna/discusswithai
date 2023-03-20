@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"fmt"
+
 	"github.com/hirosassa/zerodriver"
 	"github.com/rs/zerolog"
 	semconv "go.opentelemetry.io/otel/semconv/v1.18.0"
@@ -50,6 +52,11 @@ func (logger *zerologLogger) WithString(key string, value string) Logger {
 // Info logs a new message with information level.
 func (logger *zerologLogger) Info(value string) {
 	logger.decorateEvent(logger.zerolog.Info()).Msg(value)
+}
+
+// Printf logs a new message with information level.
+func (logger *zerologLogger) Printf(s string, i ...interface{}) {
+	logger.decorateEvent(logger.zerolog.Info()).Msg(fmt.Sprintf(s, i...))
 }
 
 // Trace logs a new message with trace level.
