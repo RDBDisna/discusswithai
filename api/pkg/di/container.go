@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/NdoleStudio/go-otelroundtripper"
+	"go.opentelemetry.io/otel/metric/global"
+
 	"github.com/NdoleStudio/discusswithai/pkg/whatsapp"
 
 	cloudtrace "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
@@ -24,6 +27,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	fiberLogger "github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/swagger"
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/hirosassa/zerodriver"
 	"github.com/palantir/stacktrace"
 	"github.com/redis/go-redis/v9"
@@ -34,7 +38,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.18.0"
 	"gorm.io/driver/postgres"
 	gormLogger "gorm.io/gorm/logger"
 
@@ -45,6 +49,7 @@ import (
 // Container is used to resolve services at runtime
 type Container struct {
 	projectID string
+	version   string
 	db        *gorm.DB
 	app       *fiber.App
 	logger    telemetry.Logger
@@ -59,6 +64,7 @@ func NewContainer(version string, projectID string) (container *Container) {
 
 	container = &Container{
 		projectID: projectID,
+		version:   version,
 		logger:    logger(3).WithService(fmt.Sprintf("%T", container)),
 	}
 
@@ -185,20 +191,29 @@ func (container *Container) NexmoService() (service *services.NexmoService) {
 func (container *Container) HTTPClient(name string) *http.Client {
 	container.logger.Debug(fmt.Sprintf("creating %s %T", name, http.DefaultClient))
 	return &http.Client{
-		Timeout: 60 * time.Second,
+		Transport: container.HTTPRoundTripper(name),
+		Timeout:   60 * time.Second,
 	}
 }
 
-//// HTTPRoundTripper creates an open telemetry http.RoundTripper
-//func (container *Container) HTTPRoundTripper(name string) http.RoundTripper {
-//	container.logger.Debug(fmt.Sprintf("Debug: initializing %s %T", name, http.DefaultTransport))
-//	return otelroundtripper.New(
-//		otelroundtripper.WithName(name),
-//		otelroundtripper.WithParent(container.RetryHTTPRoundTripper()),
-//		otelroundtripper.WithMeter(global.Meter(container.projectID)),
-//		otelroundtripper.WithAttributes(container.OtelResources(container.version, container.projectID).Attributes()...),
-//	)
-//}
+// HTTPRoundTripper creates an open telemetry http.RoundTripper
+func (container *Container) HTTPRoundTripper(name string) http.RoundTripper {
+	container.logger.Debug(fmt.Sprintf("Debug: initializing %s %T", name, http.DefaultTransport))
+	return otelroundtripper.New(
+		otelroundtripper.WithName(name),
+		otelroundtripper.WithParent(container.RetryHTTPRoundTripper()),
+		otelroundtripper.WithMeter(global.Meter(container.projectID)),
+		otelroundtripper.WithAttributes(container.InitializeOtelResources(container.version, container.projectID).Attributes()...),
+	)
+}
+
+// RetryHTTPRoundTripper creates a retryable http.RoundTripper
+func (container *Container) RetryHTTPRoundTripper() http.RoundTripper {
+	container.logger.Debug(fmt.Sprintf("initializing retry %T", http.DefaultTransport))
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = container.Logger()
+	return retryClient.StandardClient().Transport
+}
 
 // App creates a new instance of fiber.App
 func (container *Container) App() (app *fiber.App) {
